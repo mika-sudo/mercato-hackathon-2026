@@ -9,7 +9,8 @@ const api =
     ? new MockClassifierApi()
     : new JevClient({
         baseUrl: configuration.apiBaseUrl,
-        apiKey: configuration.apiKey
+        // Read only here so the key is bundled into the worker, never the Gmail content script.
+        apiKey: String(import.meta.env.VITE_API_KEY ?? "").trim() || null
       });
 
 const broker = new Broker(api);

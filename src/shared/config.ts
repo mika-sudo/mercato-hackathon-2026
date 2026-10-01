@@ -1,6 +1,5 @@
 export interface Configuration {
   apiBaseUrl: string | null;
-  apiKey: string | null;
   inboxSdkAppId: string | null;
   useMock: boolean;
   issues: string[];
@@ -34,7 +33,6 @@ export function configurationFrom(env: Record<string, unknown>): Configuration {
     }
   }
 
-  const apiKey = String(env.VITE_API_KEY ?? "").trim() || null;
   const sdk = String(env.VITE_INBOXSDK_APP_ID ?? "").trim();
   const inboxSdkAppId = /^sdk_[a-zA-Z0-9_-]{5,15}_[0-9a-f]{10}$/.test(sdk) ? sdk : null;
   if (!inboxSdkAppId) {
@@ -43,7 +41,6 @@ export function configurationFrom(env: Record<string, unknown>): Configuration {
 
   return {
     apiBaseUrl,
-    apiKey,
     inboxSdkAppId,
     useMock,
     issues,
@@ -53,6 +50,5 @@ export function configurationFrom(env: Record<string, unknown>): Configuration {
 
 export const configuration = configurationFrom({
   VITE_API_BASE_URL: import.meta.env.VITE_API_BASE_URL,
-  VITE_API_KEY: import.meta.env.VITE_API_KEY,
   VITE_INBOXSDK_APP_ID: import.meta.env.VITE_INBOXSDK_APP_ID
 });
