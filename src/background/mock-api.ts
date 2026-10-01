@@ -1,4 +1,4 @@
-import type { Folder, ThreadCategory } from "../shared/contracts";
+import type { Folder, FolderCounts, ThreadCategory } from "../shared/contracts";
 import { DEFAULT_FOLDERS } from "../shared/folders";
 import type { ClassifierApi } from "./api";
 
@@ -9,6 +9,16 @@ export class MockClassifierApi implements ClassifierApi {
 
   async listFolders(_mailboxEmail: string): Promise<Folder[]> {
     return FIXTURE_FOLDERS.map((folder) => ({ ...folder }));
+  }
+
+  async getFolderCounts(mailboxEmail: string): Promise<FolderCounts> {
+    const counts: FolderCounts = {};
+    for (const category of this.getMailboxCategories(mailboxEmail).values()) {
+      if (!category.folderId) continue;
+      const count = (counts[category.folderId] ??= { threads: 0, unread: 0 });
+      count.threads += 1;
+    }
+    return counts;
   }
 
   async getCategories(mailboxEmail: string, gmailThreadIds: string[]): Promise<ThreadCategory[]> {

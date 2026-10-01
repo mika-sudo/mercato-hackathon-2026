@@ -1,4 +1,4 @@
-import type { Folder, ThreadCategory } from "../shared/contracts";
+import type { Folder, FolderCounts, ThreadCategory } from "../shared/contracts";
 import { ExtensionError, isGmailUrl, publicError, requestSchema } from "../shared/messages";
 import type { Reply, Request } from "../shared/messages";
 import type { ClassifierApi } from "./api";
@@ -47,6 +47,8 @@ export class Broker {
     switch (request.kind) {
       case "folders.list":
         return { folders: await this.readFolders(request.mailboxEmail) };
+      case "folders.counts":
+        return { counts: await this.api.getFolderCounts(request.mailboxEmail) };
       case "threads.categories":
         return {
           categories: await this.api.getCategories(request.mailboxEmail, request.gmailThreadIds)
@@ -82,6 +84,7 @@ export class Broker {
 
 interface DispatchReplyMap {
   "folders.list": { folders: Folder[] };
+  "folders.counts": { counts: FolderCounts };
   "threads.categories": { categories: ThreadCategory[] };
   "thread.classify": { category: ThreadCategory };
   "thread.setFolder": { category: ThreadCategory };

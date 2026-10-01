@@ -33,6 +33,16 @@ export const foldersResponseSchema = z.object({
   folders: z.array(folderSchema)
 });
 
+export const folderCountSchema = z
+  .object({
+    threads: z.number().int().min(0),
+    unread: z.number().int().min(0)
+  })
+  .strict();
+
+/** Mailbox-wide thread counts per folder id. */
+export const folderCountsSchema = z.record(z.string().min(1).max(128), folderCountSchema);
+
 export const categoriesResponseSchema = z.object({
   categories: z.array(threadCategorySchema)
 });
@@ -56,6 +66,7 @@ export const apiErrorSchema = z
 export type Folder = z.infer<typeof folderSchema>;
 export type ThreadCategory = z.infer<typeof threadCategorySchema>;
 export type FoldersResponse = z.infer<typeof foldersResponseSchema>;
+export type FolderCounts = z.infer<typeof folderCountsSchema>;
 export type CategoriesResponse = z.infer<typeof categoriesResponseSchema>;
 export type ClassifyResponse = z.infer<typeof classifyResponseSchema>;
 export type SetFolderResponse = z.infer<typeof setFolderResponseSchema>;

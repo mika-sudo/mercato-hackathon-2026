@@ -1,9 +1,10 @@
 import type { Folder } from "../shared/contracts";
 import { DEFAULT_FOLDERS } from "../shared/folders";
-import type { MailRoute } from "../gmail/adapter";
+import type { MailRoute, VisibleRow } from "../gmail/adapter";
 import { folderFromQuery, folderSearchQuery, userSearchText } from "../gmail/search";
 import type { FolderControllerState } from "./controller";
 import { SearchBarView } from "./search-bar";
+import { nextFrames, prefersReducedMotion, sweepRowsIntoFolders } from "./sweep-animation";
 
 const TOGGLE_STORAGE_KEY = "mercato-shell-visible";
 
@@ -66,6 +67,19 @@ const STYLES = `
   html[data-mercato-visible="1"] div[role="main"] .aKh,
   html[data-mercato-visible="1"] div[role="main"] table:has([role="tablist"]) {
     display: none !important;
+  }
+  html[data-mercato-visible="1"] div[role="main"] [role="toolbar"][aria-label="search refinement"],
+  html[data-mercato-visible="1"] div[role="main"] [role="toolbar"]:has([data-impression-suffix="ADVANCED_SEARCH_LINK"]) {
+    display: none !important;
+  }
+  /* Gmail sizes this toolbar block to fit the chips row as well; without this the hidden row leaves a gap. */
+  html[data-mercato-visible="1"] div[role="main"] [gh="tm"]:has(> [role="toolbar"][aria-label="search refinement"]),
+  html[data-mercato-visible="1"] div[role="main"] [gh="tm"]:has(> [role="toolbar"] [data-impression-suffix="ADVANCED_SEARCH_LINK"]) {
+    height: auto !important;
+    min-height: 0 !important;
+    flex-basis: auto !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
   }
   [data-mercato-shell] {
     display: inline-flex;
@@ -137,15 +151,46 @@ const STYLES = `
     left: 14px;
     bottom: 14px;
     z-index: 2147483647;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     border: 1px solid #d0d5dd;
     border-radius: 999px;
     background: #ffffff;
     color: #111827;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 7px 12px;
+    font: 600 12px/1 "Google Sans", Roboto, Arial, sans-serif;
+    padding: 6px 8px 6px 12px;
     cursor: pointer;
     box-shadow: 0 4px 10px rgba(16, 24, 40, 0.12);
+  }
+  .mercato-shell-toggle:focus-visible {
+    outline: 2px solid #0b57d0;
+    outline-offset: 2px;
+  }
+  .mercato-toggle-track {
+    position: relative;
+    width: 28px;
+    height: 16px;
+    border-radius: 8px;
+    background: #c4c7c5;
+    transition: background-color 150ms ease;
+  }
+  .mercato-toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    transition: transform 150ms ease;
+  }
+  .mercato-shell-toggle[aria-checked="true"] .mercato-toggle-track {
+    background: #0b57d0;
+  }
+  .mercato-shell-toggle[aria-checked="true"] .mercato-toggle-knob {
+    transform: translateX(12px);
   }
 `;
 
@@ -160,6 +205,7 @@ export interface MailNavigator {
   search(query: string): Promise<void>;
   openInbox(): Promise<void>;
   replaceSearch(element: HTMLElement | null): void;
+  visibleRows(): VisibleRow[];
 }
 
 export class FolderShellView {
@@ -174,6 +220,9 @@ export class FolderShellView {
   private activeFolderId: string | null = DEFAULT_FOLDERS[0]!.id;
   /** Opening P0 waits until Gmail has a route; the extension can load before it does. */
   private pendingActivation = false;
+  private sweeping = false;
+  /** Counts shown while emails fly in; they tick up to the real counts as each one lands. */
+  private sweepCounts: Map<string, number> | null = null;
   private destroyed = false;
 
   constructor(
@@ -188,7 +237,7 @@ export class FolderShellView {
   mount(): void {
     if (this.destroyed) return;
     this.ensureDom();
-    if (this.visible) this.activate();
+    if (this.visible) void this.activate();
     this.render(this.controller.getState());
   }
 
@@ -197,7 +246,7 @@ export class FolderShellView {
     this.ensureDom();
     const row = this.row;
     if (!row) return;
-    if (this.pendingActivation) this.activate();
+    if (this.pendingActivation) void this.activate();
     const folders = this.folders(state);
     const route = this.navigator?.currentRoute() ?? null;
     if (route?.list) {
@@ -209,22 +258,19 @@ export class FolderShellView {
     this.searchBar.sync(typed, activeFolder?.name ?? null);
     row.replaceChildren();
 
-    const counts = new Map<string, number>();
-    for (const category of Object.values(state.categoryByThread)) {
-      if (!category.folderId) continue;
-      counts.set(category.folderId, (counts.get(category.folderId) ?? 0) + 1);
-    }
-
+    const counts = folderCounts(state);
     const openThreadId = state.snapshot.openThreadId;
     const openCategory = openThreadId ? state.categoryByThread[openThreadId] : undefined;
 
     for (const folder of folders) {
-      const count = counts.get(folder.id) ?? 0;
+      const count = this.sweepCounts?.get(folder.id) ?? counts.get(folder.id) ?? 0;
       const button = this.doc.createElement("button");
       button.type = "button";
       button.className = "mercato-folder-box";
       button.dataset.mercatoFolderId = folder.id;
       button.setAttribute("aria-label", `${folder.name}, ${count}`);
+      const apiCount = state.folderCounts?.[folder.id];
+      if (apiCount) button.title = `${apiCount.threads} emails, ${apiCount.unread} unread`;
       button.setAttribute("aria-pressed", String(folder.id === this.activeFolderId));
       if (openCategory?.folderId === folder.id) button.setAttribute("aria-current", "true");
       button.addEventListener("click", (event) => {
@@ -234,7 +280,7 @@ export class FolderShellView {
           void this.controller.setFolder(threadId, folder.id).catch(() => undefined);
           return;
         }
-        this.openFolder(folder);
+        void this.openFolder(folder);
       });
 
       const title = this.doc.createElement("span");
@@ -304,10 +350,24 @@ export class FolderShellView {
       const toggle = this.doc.createElement("button");
       toggle.type = "button";
       toggle.className = "mercato-shell-toggle";
+      toggle.setAttribute("role", "switch");
+      const label = this.doc.createElement("span");
+      label.textContent = "Talos";
+      const track = this.doc.createElement("span");
+      track.className = "mercato-toggle-track";
+      const knob = this.doc.createElement("span");
+      knob.className = "mercato-toggle-knob";
+      track.append(knob);
+      toggle.append(label, track);
       toggle.addEventListener("click", () => {
+        if (this.sweeping) return;
         this.visible = !this.visible;
         writeVisibleState(this.visible);
-        if (this.visible) this.activate();
+        if (this.visible && this.canSweep()) {
+          void this.sweepIn();
+          return;
+        }
+        if (this.visible) void this.activate();
         else this.deactivate();
         this.render(this.controller.getState());
       });
@@ -327,24 +387,107 @@ export class FolderShellView {
   }
 
   /** Turning Mercato on takes over search and opens P0, unless a Mercato folder is already open. */
-  private activate(): void {
+  private async activate(): Promise<void> {
     this.navigator?.replaceSearch(this.searchBar.element);
-    const first = this.folders(this.controller.getState())[0] ?? null;
     if (!this.navigator) {
-      this.activeFolderId = first?.id ?? null;
+      this.activeFolderId = this.folders(this.controller.getState())[0]?.id ?? null;
       this.pendingActivation = false;
       return;
     }
-    const route = this.navigator.currentRoute();
-    if (!route) {
+    if (!this.navigator.currentRoute()) {
       this.pendingActivation = true;
       return;
     }
     this.pendingActivation = false;
-    if (!route.list || !first) return;
+    const folder = this.folderToOpenOnActivate();
+    if (folder) await this.openFolder(folder);
+  }
+
+  private folderToOpenOnActivate(): Folder | null {
+    const route = this.navigator?.currentRoute();
+    if (!route?.list) return null;
     const folders = this.folders(this.controller.getState());
-    if (route.query !== null && folderFromQuery(route.query, folders)) return;
-    this.openFolder(first);
+    if (route.query !== null && folderFromQuery(route.query, folders)) return null;
+    return folders[0] ?? null;
+  }
+
+  /** The sweep only makes sense when turning on replaces the visible list with P0. */
+  private canSweep(): boolean {
+    if (!this.navigator || prefersReducedMotion()) return false;
+    if (this.controller.getState().snapshot.openThreadId) return false;
+    return this.folderToOpenOnActivate() !== null;
+  }
+
+  private async sweepIn(): Promise<void> {
+    const navigator = this.navigator;
+    if (!navigator) return;
+    this.sweeping = true;
+    let release: ((maxWaitMs?: number) => void) | null = null;
+    try {
+      navigator.replaceSearch(this.searchBar.element);
+      this.render(this.controller.getState());
+      // Let the chips lay out and the tab row collapse before measuring rows and targets.
+      await nextFrames(2);
+      const rows = navigator.visibleRows();
+      if (rows.length && !this.destroyed) {
+        const state = this.controller.getState();
+        const folderOf = (threadId: string) => state.categoryByThread[threadId]?.folderId ?? null;
+        const counts = folderCounts(state);
+        for (const row of rows) {
+          const folderId = folderOf(row.threadId);
+          if (folderId) counts.set(folderId, Math.max(0, (counts.get(folderId) ?? 1) - 1));
+        }
+        this.sweepCounts = counts;
+        this.render(state);
+        release = await sweepRowsIntoFolders({
+          rows,
+          targetFor: (threadId) => {
+            const folderId = folderOf(threadId);
+            return folderId ? this.chipFor(folderId) : null;
+          },
+          onLand: (threadId) => {
+            const folderId = folderOf(threadId);
+            if (folderId) this.landInChip(folderId);
+          },
+          doc: this.doc
+        });
+      }
+    } catch {
+      // A failed animation must not keep Mercato from turning on.
+    } finally {
+      this.sweepCounts = null;
+      this.sweeping = false;
+    }
+    if (this.destroyed) {
+      release?.();
+      return;
+    }
+    await this.activate();
+    release?.(3000);
+    this.render(this.controller.getState());
+  }
+
+  private chipFor(folderId: string): HTMLElement | null {
+    const chip = this.row?.querySelector<HTMLElement>(
+      `[data-mercato-folder-id="${CSS.escape(folderId)}"]`
+    );
+    return chip && chip.isConnected && isVisible(chip) ? chip : null;
+  }
+
+  private landInChip(folderId: string): void {
+    if (!this.sweepCounts) return;
+    const count = (this.sweepCounts.get(folderId) ?? 0) + 1;
+    this.sweepCounts.set(folderId, count);
+    const chip = this.chipFor(folderId);
+    if (!chip) return;
+    const countEl = chip.querySelector(".mercato-folder-count");
+    if (countEl) countEl.textContent = String(count);
+    if (!chip.getAnimations().length) {
+      chip.animate(
+        [{ transform: "scale(1)" }, { transform: "scale(1.12)" }, { transform: "scale(1)" }],
+        { duration: 220, easing: "ease-out" }
+      );
+    }
   }
 
   /** Turning Mercato off restores Gmail's search and leaves Mercato folders for the inbox. */
@@ -359,14 +502,14 @@ export class FolderShellView {
     }
   }
 
-  private openFolder(folder: Folder): void {
+  private async openFolder(folder: Folder): Promise<void> {
     this.activeFolderId = folder.id;
     if (!this.navigator) {
       this.render(this.controller.getState());
       return;
     }
     const folders = this.folders(this.controller.getState());
-    void this.navigator.search(folderSearchQuery(this.searchBar.text, folder, folders)).catch(() => undefined);
+    await this.navigator.search(folderSearchQuery(this.searchBar.text, folder, folders)).catch(() => undefined);
   }
 
   private runSearch(text: string): void {
@@ -397,8 +540,22 @@ export class FolderShellView {
   private syncVisibility(): void {
     this.doc.documentElement.dataset.mercatoVisible = this.visible ? "1" : "0";
     if (this.host) this.host.style.display = this.visible ? "" : "none";
-    if (this.toggle) this.toggle.textContent = this.visible ? "Hide Mercato" : "Show Mercato";
+    this.toggle?.setAttribute("aria-checked", String(this.visible));
   }
+}
+
+/** Mailbox-wide counts from the API, or counts of the threads seen in this tab until they load. */
+function folderCounts(state: FolderControllerState): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (state.folderCounts) {
+    for (const [folderId, count] of Object.entries(state.folderCounts)) counts.set(folderId, count.threads);
+    return counts;
+  }
+  for (const category of Object.values(state.categoryByThread)) {
+    if (!category.folderId) continue;
+    counts.set(category.folderId, (counts.get(category.folderId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function isVisible(el: HTMLElement): boolean {

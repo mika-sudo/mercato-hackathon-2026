@@ -46,6 +46,8 @@ describe("FolderController", () => {
       switch (request.kind) {
         case "folders.list":
           return { folders: [folder] } as T;
+        case "folders.counts":
+          return { counts: {} } as T;
         case "thread.setFolder":
           throw new Error("set failed");
         default:
@@ -85,6 +87,8 @@ describe("FolderController", () => {
       switch (request.kind) {
         case "folders.list":
           return { folders: [] } as T;
+        case "folders.counts":
+          return { counts: {} } as T;
         case "thread.classify":
           return { category } as T;
         default:

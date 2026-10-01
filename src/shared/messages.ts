@@ -13,6 +13,7 @@ const base = { channel: z.literal(CHANNEL) };
 
 export const requestSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("folders.list"), mailboxEmail: emailSchema }).strict(),
+  z.object({ ...base, kind: z.literal("folders.counts"), mailboxEmail: emailSchema }).strict(),
   z
     .object({
       ...base,

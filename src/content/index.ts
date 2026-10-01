@@ -112,6 +112,7 @@ async function start(): Promise<void> {
 function mountStaticShell(message: string): void {
   const state: FolderControllerState = {
     folders: DEFAULT_FOLDERS,
+    folderCounts: null,
     categoryByThread: {},
     loading: { folders: false, categories: false },
     error: message,

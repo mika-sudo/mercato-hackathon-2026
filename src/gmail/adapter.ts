@@ -10,6 +10,11 @@ export interface AdapterSnapshot {
   visibleThreadIds: string[];
 }
 
+export interface VisibleRow {
+  threadId: string;
+  element: HTMLElement;
+}
+
 export interface MailRoute {
   list: boolean;
   /** True for Gmail search results, false for native lists like Inbox or Sent. */
@@ -26,7 +31,7 @@ export function gmailApiId(value: unknown): string | null {
 export class InboxSdkAdapter {
   private mailboxEmail: string | null = null;
   private openThreadId: string | null = null;
-  private readonly visibleThreadIds = new Set<string>();
+  private readonly rows = new Map<string, HTMLElement>();
   private readonly listeners = new Set<() => void>();
   private readonly cleanup: Dispose[] = [];
   private searchReplacement: HTMLElement | null = null;
@@ -39,10 +44,11 @@ export class InboxSdkAdapter {
   start(): void {
     if (this.destroyed) return;
     this.syncMailbox();
+    // Rows and thread views report their own destroy; this also runs on window focus,
+    // so it must not forget rows or the open email that are still on the page.
     const onRoute = () => {
       this.syncMailbox();
-      this.openThreadId = null;
-      this.visibleThreadIds.clear();
+      for (const [id, element] of this.rows) if (!element.isConnected) this.rows.delete(id);
       this.emit();
     };
     this.cleanup.push(
@@ -73,8 +79,20 @@ export class InboxSdkAdapter {
     return {
       mailboxEmail: this.mailboxEmail,
       openThreadId: this.openThreadId,
-      visibleThreadIds: [...this.visibleThreadIds]
+      visibleThreadIds: [...this.rows.keys()]
     };
+  }
+
+  /** Rows currently on screen, top to bottom. */
+  visibleRows(limit = 40): VisibleRow[] {
+    const viewportHeight = this.window.innerHeight;
+    return [...this.rows]
+      .map(([threadId, element]) => ({ threadId, element, rect: element.getBoundingClientRect() }))
+      .filter(({ element, rect }) =>
+        element.isConnected && rect.height > 0 && rect.bottom > 0 && rect.top < viewportHeight)
+      .sort((a, b) => a.rect.top - b.rect.top)
+      .slice(0, limit)
+      .map(({ threadId, element }) => ({ threadId, element }));
   }
 
   currentRoute(): MailRoute | null {
@@ -124,7 +142,7 @@ export class InboxSdkAdapter {
     for (const dispose of [...this.cleanup]) dispose();
     this.cleanup.length = 0;
     this.listeners.clear();
-    this.visibleThreadIds.clear();
+    this.rows.clear();
     this.openThreadId = null;
   }
 
@@ -152,9 +170,10 @@ export class InboxSdkAdapter {
     if (this.destroyed) return;
     const id = gmailApiId(await row.getThreadIDAsync().catch(() => null));
     if (!id) return;
-    this.visibleThreadIds.add(id);
+    const element = row.getElement();
+    this.rows.set(id, element);
     row.on("destroy", () => {
-      this.visibleThreadIds.delete(id);
+      if (this.rows.get(id) === element) this.rows.delete(id);
       this.emit();
     });
     this.emit();

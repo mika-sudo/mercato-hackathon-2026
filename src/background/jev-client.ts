@@ -1,12 +1,27 @@
-import {
-  categoriesResponseSchema,
-  classifyResponseSchema,
-  foldersResponseSchema,
-  setFolderResponseSchema
-} from "../shared/contracts";
+import { z } from "zod";
+import type { Folder, FolderCounts, ThreadCategory } from "../shared/contracts";
+import { DEFAULT_FOLDERS } from "../shared/folders";
 import { ExtensionError } from "../shared/messages";
-import type { Folder, ThreadCategory } from "../shared/contracts";
 import type { ClassifierApi } from "./api";
+
+const labelCountsSchema = z.object({
+  counts: z.record(
+    z.string().min(1).max(128),
+    z.object({
+      label: z.string().min(1).max(225),
+      threads: z.number().int().min(0),
+      unread_threads: z.number().int().min(0)
+    })
+  )
+});
+
+const triageSchema = z.object({
+  labels: z.record(z.string(), z.string().min(1).max(128))
+});
+
+const healthSchema = z.object({
+  account: z.string().nullable().optional()
+});
 
 interface JevClientOptions {
   baseUrl: string;
@@ -14,68 +29,90 @@ interface JevClientOptions {
   fetcher?: typeof fetch;
 }
 
+/** Client for the Mercato triage API. The backend triages a single Gmail account. */
 export class JevClient implements ClassifierApi {
   private readonly fetcher: typeof fetch;
 
   constructor(private readonly options: JevClientOptions) {
-    this.fetcher = options.fetcher ?? fetch;
+    this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
   }
 
+  /** The API's triage categories that have a box; others (such as `done`) are not shown. */
   async listFolders(mailboxEmail: string): Promise<Folder[]> {
-    const search = new URLSearchParams({ mailbox: mailboxEmail });
-    const payload = await this.request(`/folders?${search.toString()}`);
-    return foldersResponseSchema.parse(payload).folders;
-  }
-
-  async getCategories(mailboxEmail: string, gmailThreadIds: string[]): Promise<ThreadCategory[]> {
-    const payload = await this.request("/threads/categories", {
-      method: "POST",
-      body: JSON.stringify({ mailboxEmail, gmailThreadIds })
+    const [counts, health] = await Promise.all([this.labelCounts(), this.request("/health")]);
+    const account = healthSchema.parse(health).account;
+    if (account && account.toLowerCase() !== mailboxEmail.toLowerCase()) {
+      throw new ExtensionError(
+        "MAILBOX_MISMATCH",
+        `The Mercato API triages ${account}, but Gmail is signed in as ${mailboxEmail}.`
+      );
+    }
+    return DEFAULT_FOLDERS.flatMap((folder) => {
+      const category = counts[folder.id];
+      return category ? [{ ...folder, gmailLabel: category.label }] : [];
     });
-    return categoriesResponseSchema.parse(payload).categories;
   }
 
+  async getFolderCounts(_mailboxEmail: string): Promise<FolderCounts> {
+    const counts = await this.labelCounts();
+    return Object.fromEntries(
+      Object.entries(counts).map(([id, count]) => [
+        id,
+        { threads: count.threads, unread: count.unread_threads }
+      ])
+    );
+  }
+
+  async getCategories(_mailboxEmail: string, gmailThreadIds: string[]): Promise<ThreadCategory[]> {
+    const search = new URLSearchParams({ thread_ids: gmailThreadIds.join(",") });
+    const { labels } = triageSchema.parse(await this.request(`/triage?${search.toString()}`));
+    const updatedAt = new Date().toISOString();
+    return gmailThreadIds.map((gmailThreadId) => ({
+      gmailThreadId,
+      folderId: labels[gmailThreadId] ?? null,
+      source: "classifier",
+      updatedAt
+    }));
+  }
+
+  /** Wakes the backend's triage pass; the result shows up once that pass reaches the thread. */
   async classifyThread(mailboxEmail: string, gmailThreadId: string): Promise<ThreadCategory> {
-    const payload = await this.request(`/threads/${gmailThreadId}/classify`, {
-      method: "POST",
-      body: JSON.stringify({ mailboxEmail })
-    });
-    return classifyResponseSchema.parse(payload).category;
+    await this.request("/run", { method: "POST" });
+    const [category] = await this.getCategories(mailboxEmail, [gmailThreadId]);
+    if (!category) throw new ExtensionError("INVALID_UPSTREAM_RESPONSE", "Triage returned no result.");
+    return category;
   }
 
-  async setThreadFolder(
-    mailboxEmail: string,
-    gmailThreadId: string,
-    folderId: string | null
-  ): Promise<ThreadCategory> {
-    const payload = await this.request(`/threads/${gmailThreadId}/folder`, {
-      method: "PUT",
-      body: JSON.stringify({ mailboxEmail, folderId })
-    });
-    return setFolderResponseSchema.parse(payload).category;
+  async setThreadFolder(): Promise<ThreadCategory> {
+    throw new ExtensionError(
+      "NOT_SUPPORTED",
+      "Filing emails isn't available yet: the Mercato API has no endpoint for it.",
+      501
+    );
+  }
+
+  private async labelCounts() {
+    return labelCountsSchema.parse(await this.request("/labels/counts")).counts;
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<unknown> {
     const headers = new Headers(init.headers ?? {});
     headers.set("Accept", "application/json");
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
-    if (this.options.apiKey) headers.set("Authorization", `Bearer ${this.options.apiKey}`);
+    if (this.options.apiKey) headers.set("X-API-Key", this.options.apiKey);
 
-    const url = `${this.options.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+    const url = `${this.options.baseUrl.replace(/\/+$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
     const response = await this.fetcher(url, { ...init, headers });
     const text = await response.text();
     const json = text ? safeJsonParse(text) : null;
 
     if (!response.ok) {
-      const code = typeof json === "object" && json && "code" in json ? String(json.code) : "UPSTREAM_ERROR";
-      const message =
-        typeof json === "object" && json && "message" in json
-          ? String(json.message)
-          : `Request failed with status ${response.status}`;
-      throw new ExtensionError(code, message, response.status);
-    }
-    if (json === null) {
-      throw new ExtensionError("INVALID_UPSTREAM_RESPONSE", "The classifier API returned an empty response.");
+      const detail = typeof json === "object" && json && "detail" in json ? json.detail : null;
+      throw new ExtensionError(
+        response.status === 401 || response.status === 403 ? "UNAUTHORIZED" : "UPSTREAM_ERROR",
+        typeof detail === "string" ? detail : `Request failed with status ${response.status}`,
+        response.status
+      );
     }
     return json;
   }
@@ -85,6 +122,6 @@ function safeJsonParse(input: string): unknown {
   try {
     return JSON.parse(input) as unknown;
   } catch {
-    throw new ExtensionError("INVALID_UPSTREAM_RESPONSE", "The classifier API returned malformed JSON.");
+    throw new ExtensionError("INVALID_UPSTREAM_RESPONSE", "The Mercato API returned malformed JSON.");
   }
 }

@@ -1,10 +1,14 @@
 import type { Rpc } from "../shared/client";
 import { ExtensionError } from "../shared/messages";
-import type { Folder, ThreadCategory } from "../shared/contracts";
+import type { Folder, FolderCounts, ThreadCategory } from "../shared/contracts";
 import type { AdapterSnapshot, Dispose, InboxSdkAdapter } from "../gmail/adapter";
+
+const COUNTS_REFRESH_MS = 60_000;
 
 export interface FolderControllerState {
   folders: Folder[];
+  /** Mailbox-wide counts from the API; null until loaded. */
+  folderCounts: FolderCounts | null;
   categoryByThread: Record<string, ThreadCategory>;
   loading: {
     folders: boolean;
@@ -20,6 +24,9 @@ export class FolderController {
   private readonly pendingThreadIds = new Set<string>();
   private snapshot: AdapterSnapshot;
   private folders: Folder[] = [];
+  private folderCounts: FolderCounts | null = null;
+  private countsMailbox: string | null = null;
+  private countsTimer: ReturnType<typeof setInterval> | null = null;
   private loadingFolders = false;
   private loadingCategories = false;
   private error: string | null = null;
@@ -39,12 +46,17 @@ export class FolderController {
 
   start(): void {
     this.onAdapterChanged();
+    this.countsTimer ??= setInterval(() => void this.refreshTriage(), COUNTS_REFRESH_MS);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.stopAdapter();
+    if (this.countsTimer) {
+      clearInterval(this.countsTimer);
+      this.countsTimer = null;
+    }
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -60,6 +72,11 @@ export class FolderController {
   getState(): FolderControllerState {
     return {
       folders: this.folders.map((folder) => ({ ...folder })),
+      folderCounts: this.folderCounts
+        ? Object.fromEntries(
+            Object.entries(this.folderCounts).map(([folderId, count]) => [folderId, { ...count }])
+          )
+        : null,
       categoryByThread: Object.fromEntries(
         [...this.categoryByThread.entries()].map(([threadId, category]) => [
           threadId,
@@ -83,8 +100,23 @@ export class FolderController {
     const mailbox = this.snapshot.mailboxEmail;
     if (!mailbox) return;
     await this.loadFolders(mailbox, true);
+    await this.loadCounts(mailbox);
     this.queueThreadIds(this.relevantThreadIds());
     await this.flushPending();
+  }
+
+  /** The backend triages in the background: refresh counts and re-ask about untriaged rows. */
+  private async refreshTriage(): Promise<void> {
+    const mailbox = this.snapshot.mailboxEmail;
+    if (this.destroyed || !mailbox) return;
+    for (const id of this.relevantThreadIds()) {
+      const category = this.categoryByThread.get(id);
+      if (category?.source === "classifier" && category.folderId === null) {
+        this.categoryByThread.delete(id);
+      }
+    }
+    this.queueThreadIds(this.relevantThreadIds());
+    await this.loadCounts(mailbox);
   }
 
   async setFolder(gmailThreadId: string, folderId: string | null): Promise<void> {
@@ -142,6 +174,7 @@ export class FolderController {
       this.loadingCategories = false;
       this.emit();
     }
+    await this.loadCounts(mailbox);
   }
 
   private onAdapterChanged(): void {
@@ -152,11 +185,16 @@ export class FolderController {
     if (mailboxChanged) {
       this.folderMailbox = null;
       this.folders = [];
+      this.folderCounts = null;
       this.categoryByThread.clear();
     }
     const mailbox = snapshot.mailboxEmail;
     if (mailbox && mailbox !== this.folderMailbox) {
       void this.loadFolders(mailbox);
+    }
+    if (mailbox && mailbox !== this.countsMailbox) {
+      this.countsMailbox = mailbox;
+      void this.loadCounts(mailbox);
     }
     this.queueThreadIds(this.relevantThreadIds());
     this.emit();
@@ -232,6 +270,20 @@ export class FolderController {
       this.loadingFolders = false;
       this.emit();
     }
+  }
+
+  private async loadCounts(mailboxEmail: string): Promise<void> {
+    try {
+      const response = await this.rpc<{ counts: FolderCounts }>({
+        kind: "folders.counts",
+        mailboxEmail
+      });
+      if (this.destroyed || this.snapshot.mailboxEmail !== mailboxEmail) return;
+      this.folderCounts = response.counts;
+    } catch (error) {
+      this.error = errorMessage(error);
+    }
+    this.emit();
   }
 
   private emit(): void {
