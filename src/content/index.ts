@@ -2,12 +2,16 @@ import * as InboxSDK from "@inboxsdk/core";
 import { InboxSdkAdapter } from "../gmail/adapter";
 import { onWorkerChanged, rpc } from "../shared/client";
 import { configuration } from "../shared/config";
+import { DEFAULT_FOLDERS } from "../shared/folders";
 import {
   isInvalidatedContextError,
   markExtensionContextDead,
   onExtensionContextDead
 } from "../shared/extension-context";
 import { FolderController } from "./controller";
+import { FolderShellView } from "./folder-shell";
+import type { FolderShellController } from "./folder-shell";
+import type { FolderControllerState } from "./controller";
 
 declare global {
   interface Window {
@@ -26,13 +30,19 @@ scope[cleanupKey]?.();
 let disposed = false;
 let adapter: InboxSdkAdapter | undefined;
 let controller: FolderController | undefined;
+let folderShell: FolderShellView | undefined;
 let stopWorker: (() => void) | undefined;
+let stopRender: (() => void) | undefined;
 
 function cleanup(): void {
   if (disposed) return;
   disposed = true;
   stopWorker?.();
   stopWorker = undefined;
+  stopRender?.();
+  stopRender = undefined;
+  folderShell?.destroy();
+  folderShell = undefined;
   controller?.destroy();
   controller = undefined;
   adapter?.destroy();
@@ -54,7 +64,10 @@ if (window.top === window) {
 }
 
 async function start(): Promise<void> {
-  if (!configuration.inboxSdkAppId) return;
+  if (!configuration.inboxSdkAppId) {
+    mountStaticShell("Set VITE_INBOXSDK_APP_ID and rebuild to enable Gmail thread integration.");
+    return;
+  }
   const sdk = await InboxSDK.load(2, configuration.inboxSdkAppId, {
     appName: "Mercato",
     globalErrorLogging: false,
@@ -67,8 +80,13 @@ async function start(): Promise<void> {
 
   adapter = new InboxSdkAdapter(sdk);
   controller = new FolderController(adapter, rpc);
+  folderShell = new FolderShellView(controller, adapter);
   adapter.start();
   controller.start();
+  folderShell.mount();
+  stopRender = controller.subscribe(() => {
+    folderShell?.render(controller!.getState());
+  });
   stopWorker = onWorkerChanged(() => {
     void controller?.refresh();
   });
@@ -89,6 +107,26 @@ async function start(): Promise<void> {
     },
     getState: () => controller?.getState() ?? null
   };
+}
+
+function mountStaticShell(message: string): void {
+  const state: FolderControllerState = {
+    folders: DEFAULT_FOLDERS,
+    categoryByThread: {},
+    loading: { folders: false, categories: false },
+    error: message,
+    snapshot: {
+      mailboxEmail: null,
+      openThreadId: null,
+      visibleThreadIds: []
+    }
+  };
+  const shellController: FolderShellController = {
+    getState: () => state,
+    setFolder: async () => undefined
+  };
+  folderShell = new FolderShellView(shellController, null);
+  folderShell.mount();
 }
 
 function isDebugEnabled(): boolean {

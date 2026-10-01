@@ -1,13 +1,8 @@
 import type { Folder, ThreadCategory } from "../shared/contracts";
+import { DEFAULT_FOLDERS } from "../shared/folders";
 import type { ClassifierApi } from "./api";
 
-const FIXTURE_FOLDERS: Folder[] = [
-  { id: "quoting", name: "Quoting", parentId: null, order: 10, icon: "folder-quoting" },
-  { id: "shipment", name: "Shipment", parentId: null, order: 20, icon: "folder-shipment" },
-  { id: "3pl-update", name: "3PL Update", parentId: null, order: 30, icon: "folder-3pl" },
-  { id: "accounting", name: "Accounting", parentId: null, order: 40, icon: "folder-accounting" },
-  { id: "other", name: "Other", parentId: null, order: 50, icon: "folder-other" }
-];
+const FIXTURE_FOLDERS: Folder[] = DEFAULT_FOLDERS;
 
 export class MockClassifierApi implements ClassifierApi {
   private readonly categoriesByMailbox = new Map<string, Map<string, ThreadCategory>>();
