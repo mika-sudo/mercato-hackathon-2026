@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sweepRowsIntoFolders } from "../src/content/sweep-animation";
+import { slideInBoxes, sweepRowsIntoFolders } from "../src/content/sweep-animation";
 
 function row(threadId: string): { threadId: string; element: HTMLElement } {
   const element = document.createElement("div");
@@ -62,5 +62,34 @@ describe("sweepRowsIntoFolders", () => {
     shown = false;
     vi.advanceTimersByTime(100);
     expect(swept.element.style.visibility).toBe("");
+  });
+});
+
+describe("slideInBoxes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  it("slides every box out from the first one, left to right", async () => {
+    const boxes = [0, 120, 260].map((left) => {
+      const box = document.createElement("button");
+      box.getBoundingClientRect = () => new DOMRect(left, 0, 100, 30);
+      box.animate = vi.fn(() => ({ finished: Promise.resolve() })) as never;
+      document.body.append(box);
+      return box;
+    });
+
+    await slideInBoxes(boxes);
+
+    const calls = boxes.map((box) => vi.mocked(box.animate).mock.calls[0]!);
+    expect(calls.map(([frames]) => (frames as Keyframe[])[0]!.transform)).toEqual([
+      "translateX(-16px)",
+      "translateX(-136px)",
+      "translateX(-276px)"
+    ]);
+    const delays = calls.map(([, options]) => (options as KeyframeAnimationOptions).delay);
+    expect(delays).toEqual([0, 80, 160]);
+    expect(boxes.map((box) => box.style.zIndex)).toEqual(["", "", ""]);
   });
 });

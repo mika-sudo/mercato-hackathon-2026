@@ -3,6 +3,10 @@ import type { VisibleRow } from "../gmail/adapter";
 const FLIGHT_MS = 650;
 const STAGGER_MS = 30;
 const FADE_MS = 300;
+const SLIDE_MS = 450;
+const SLIDE_STAGGER_MS = 80;
+/** Boxes start this far left of the first box. */
+const SLIDE_FROM_PX = 16;
 
 export interface SweepOptions {
   rows: VisibleRow[];
@@ -24,6 +28,40 @@ export function nextFrames(count = 2): Promise<void> {
     };
     step(count);
   });
+}
+
+/**
+ * Deals the boxes out from the leftmost one, left to right, each from behind the one before it
+ * (boxes must be positioned for that stacking). Resolves once all are in place.
+ */
+export async function slideInBoxes(boxes: HTMLElement[]): Promise<void> {
+  const first = boxes[0]?.getBoundingClientRect();
+  if (!first) return;
+  const zIndexes = boxes.map((box) => box.style.zIndex);
+  try {
+    const animations = boxes.map((box, index) => {
+      const from = box.getBoundingClientRect().left - first.left + SLIDE_FROM_PX;
+      box.style.zIndex = String(boxes.length - index);
+      return box.animate(
+        [
+          { transform: `translateX(${-from}px)`, opacity: 0 },
+          { opacity: 1, offset: 0.25 },
+          { transform: "translateX(0)", opacity: 1 }
+        ],
+        {
+          duration: SLIDE_MS,
+          delay: index * SLIDE_STAGGER_MS,
+          easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+          fill: "backwards"
+        }
+      );
+    });
+    await Promise.all(animations.map((animation) => animation.finished.catch(() => undefined)));
+  } finally {
+    boxes.forEach((box, index) => {
+      box.style.zIndex = zIndexes[index]!;
+    });
+  }
 }
 
 /**

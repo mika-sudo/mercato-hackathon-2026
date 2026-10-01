@@ -43,9 +43,10 @@
 - Gmail's toolbar block (`div.D.E.G-atb.PY`, `gh="tm"`) can win hit-testing over the chips. The shell
   host is raised with `z-index`, and a capture-phase click handler routes clicks that land on an
   ancestor of a chip, inside the chip's rectangle, to that chip.
-- Turning Mercato on from a non-Mercato list flies copies of the on-screen rows into their chips
-  (`src/content/sweep-animation.ts`) before opening P0. It is skipped under reduced motion or
-  with an email open. Originals stay hidden until Gmail replaces the list (max 3s).
+- Turning Mercato on slides the chips out left to right, each from behind the previous one
+  (`slideInBoxes`). From a non-Mercato list it then flies copies of the on-screen rows into their
+  chips (`sweepRowsIntoFolders`) before opening P0. The fly-in is skipped with an email open; both are
+  skipped under reduced motion. Originals stay hidden until Gmail replaces the list (max 3s).
 - `InboxSdkAdapter` tracks rows and the open thread through their InboxSDK `destroy` events only.
   Route changes also fire on window focus, so they must not clear that state.
 

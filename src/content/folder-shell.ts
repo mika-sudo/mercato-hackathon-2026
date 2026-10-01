@@ -6,7 +6,7 @@ import type { FolderControllerState } from "./controller";
 import { SearchBarView } from "./search-bar";
 import { OnboardingModal } from "./onboarding-modal";
 import { loadOnboarding, saveOnboarding } from "./onboarding-store";
-import { nextFrames, prefersReducedMotion, sweepRowsIntoFolders } from "./sweep-animation";
+import { nextFrames, prefersReducedMotion, slideInBoxes, sweepRowsIntoFolders } from "./sweep-animation";
 
 const TOGGLE_STORAGE_KEY = "mercato-shell-visible";
 const PENDING_MAX_MS = 10_000;
@@ -381,17 +381,20 @@ export class FolderShellView {
   }
 
   private setTalos(on: boolean): void {
-    if (on !== this.visible) {
-      this.visible = on;
-      writeVisibleState(on);
-      if (on && this.canSweep()) {
-        void this.sweepIn();
-        return;
-      }
-      if (on) void this.activate();
-      else this.deactivate();
+    if (on === this.visible) {
+      this.render(this.controller.getState());
+      return;
     }
+    this.visible = on;
+    writeVisibleState(on);
+    if (on && this.canSweep()) {
+      void this.sweepIn();
+      return;
+    }
+    if (on) void this.activate();
+    else this.deactivate();
     this.render(this.controller.getState());
+    if (on && !prefersReducedMotion()) void slideInBoxes(this.visibleChips()).catch(() => undefined);
   }
 
   /** Building the inbox saves prompt v1 and turns Talos on; closing keeps the previous mode. */
@@ -562,12 +565,14 @@ export class FolderShellView {
     try {
       navigator.replaceSearch(this.searchBar.element);
       this.render(this.controller.getState());
-      // Let the chips lay out and the tab row collapse before measuring rows and targets.
+      // The boxes slide out first, starting now so they never flash in place.
+      const boxesIn = slideInBoxes(this.visibleChips()).catch(() => undefined);
+      // Let the tab row collapse before measuring rows.
       await nextFrames(2);
-      const rows = navigator.visibleRows();
-      if (rows.length && !this.destroyed) {
-        const state = this.controller.getState();
-        const folderOf = (threadId: string) => state.categoryByThread[threadId]?.folderId ?? null;
+      const rows = this.destroyed ? [] : navigator.visibleRows();
+      const state = this.controller.getState();
+      const folderOf = (threadId: string) => state.categoryByThread[threadId]?.folderId ?? null;
+      if (rows.length) {
         const counts = folderCounts(state);
         for (const row of rows) {
           const folderId = folderOf(row.threadId);
@@ -575,6 +580,10 @@ export class FolderShellView {
         }
         this.sweepCounts = counts;
         this.render(state);
+      }
+      // Emails fly only once every box is in place.
+      await boxesIn;
+      if (rows.length && !this.destroyed) {
         release = await sweepRowsIntoFolders({
           rows,
           targetFor: (threadId) => {
@@ -601,6 +610,10 @@ export class FolderShellView {
     await this.activate();
     release?.(3000);
     this.render(this.controller.getState());
+  }
+
+  private visibleChips(): HTMLElement[] {
+    return [...this.chips.values()].filter((chip) => chip.isConnected && isVisible(chip));
   }
 
   private chipFor(folderId: string): HTMLElement | null {
