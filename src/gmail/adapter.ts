@@ -115,6 +115,10 @@ export class InboxSdkAdapter {
     await this.sdk.Router.goto(this.sdk.Router.NativeRouteIDs.SEARCH, { query });
   }
 
+  async openLabel(label: string): Promise<void> {
+    await this.sdk.Router.goto(this.sdk.Router.NativeRouteIDs.LABEL, { labelName: label });
+  }
+
   async openInbox(): Promise<void> {
     await this.sdk.Router.goto(this.sdk.Router.NativeRouteIDs.INBOX);
   }
@@ -155,7 +159,8 @@ export class InboxSdkAdapter {
     if (this.destroyed) return;
     this.syncMailbox();
     const id = gmailApiId(await thread.getThreadIDAsync().catch(() => null));
-    if (!id) return;
+    // A view closed while its id resolved has already fired destroy; tracking it would stick.
+    if (!id || thread.destroyed) return;
     this.openThreadId = id;
     thread.on("destroy", () => {
       if (this.openThreadId === id) {
@@ -169,7 +174,7 @@ export class InboxSdkAdapter {
   private async captureThreadRow(row: ThreadRowView): Promise<void> {
     if (this.destroyed) return;
     const id = gmailApiId(await row.getThreadIDAsync().catch(() => null));
-    if (!id) return;
+    if (!id || row.destroyed) return;
     const element = row.getElement();
     this.rows.set(id, element);
     row.on("destroy", () => {

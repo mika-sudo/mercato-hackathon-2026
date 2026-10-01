@@ -237,7 +237,7 @@ export class FolderController {
       }
       this.error = null;
     } catch (error) {
-      for (const id of batch) this.pendingThreadIds.add(id);
+      // Not retried here: the threads stay unknown, so the next list change or refresh asks again.
       this.error = errorMessage(error);
     } finally {
       this.loadingCategories = this.pendingThreadIds.size > 0;

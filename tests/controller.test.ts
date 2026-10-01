@@ -105,4 +105,36 @@ describe("FolderController", () => {
     expect(controller.getState().categoryByThread.a1b2c3?.folderId).toBe("shipment");
     controller.destroy();
   });
+
+  it("does not hammer the API when category lookups fail", async () => {
+    vi.useFakeTimers();
+    const adapter = new FakeAdapter({
+      mailboxEmail: "ops@mercato.dev",
+      openThreadId: null,
+      visibleThreadIds: ["a1b2c3"]
+    });
+    const rpcImpl: Rpc = async <T>(request: ClientRequest): Promise<T> => {
+      switch (request.kind) {
+        case "folders.list":
+          return { folders: [] } as T;
+        case "folders.counts":
+          return { counts: {} } as T;
+        default:
+          throw new Error("upstream down");
+      }
+    };
+    const rpc = vi.fn(rpcImpl);
+    const lookups = () => rpc.mock.calls.filter(([request]) => request.kind === "threads.categories").length;
+
+    const controller = new FolderController(adapter as never, rpc as unknown as Rpc);
+    controller.start();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(lookups()).toBe(1);
+    expect(controller.getState().error).toBe("upstream down");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lookups()).toBe(2);
+    controller.destroy();
+    vi.useRealTimers();
+  });
 });

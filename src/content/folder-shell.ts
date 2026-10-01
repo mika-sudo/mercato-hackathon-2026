@@ -1,12 +1,15 @@
 import type { Folder } from "../shared/contracts";
 import { DEFAULT_FOLDERS } from "../shared/folders";
 import type { MailRoute, VisibleRow } from "../gmail/adapter";
-import { folderFromQuery, folderSearchQuery, userSearchText } from "../gmail/search";
+import { folderFromQuery, folderSearchQuery, quotedLabel, userSearchText } from "../gmail/search";
 import type { FolderControllerState } from "./controller";
 import { SearchBarView } from "./search-bar";
+import { OnboardingModal } from "./onboarding-modal";
+import { loadOnboarding, saveOnboarding } from "./onboarding-store";
 import { nextFrames, prefersReducedMotion, sweepRowsIntoFolders } from "./sweep-animation";
 
 const TOGGLE_STORAGE_KEY = "mercato-shell-visible";
+const PENDING_MAX_MS = 10_000;
 
 const STYLES = `
   [data-mercato-search] {
@@ -81,7 +84,10 @@ const STYLES = `
     padding-top: 8px !important;
     padding-bottom: 8px !important;
   }
+  /* Gmail's toolbar block paints over this spot on search pages; keep the boxes clickable. */
   [data-mercato-shell] {
+    position: relative;
+    z-index: 3;
     display: inline-flex;
     align-items: center;
     vertical-align: middle;
@@ -95,6 +101,8 @@ const STYLES = `
     gap: 6px;
   }
   .mercato-folder-box {
+    position: relative;
+    overflow: hidden;
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -108,6 +116,30 @@ const STYLES = `
     color: #3c4043;
     white-space: nowrap;
     cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 80ms ease;
+  }
+  .mercato-folder-box:active {
+    transform: scale(0.96);
+  }
+  .mercato-folder-box[aria-busy="true"]::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 40%;
+    height: 2px;
+    border-radius: 1px;
+    background: #0b57d0;
+    animation: mercato-box-loading 900ms ease-in-out infinite;
+  }
+  @keyframes mercato-box-loading {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(250%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mercato-folder-box { transition: none; }
+    .mercato-folder-box:active { transform: none; }
+    .mercato-folder-box[aria-busy="true"]::after { width: 100%; animation: none; }
   }
   .mercato-folder-box:hover {
     border-color: #8fadf5;
@@ -146,63 +178,73 @@ const STYLES = `
     text-align: center;
     cursor: help;
   }
-  .mercato-shell-toggle {
+  .mercato-mode {
     position: fixed;
-    left: 14px;
-    bottom: 14px;
+    left: 12px;
+    bottom: 12px;
     z-index: 2147483647;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 1px;
+    padding: 2px;
     border: 1px solid #d0d5dd;
     border-radius: 999px;
     background: #ffffff;
     color: #111827;
-    font: 600 12px/1 "Google Sans", Roboto, Arial, sans-serif;
-    padding: 6px 8px 6px 12px;
+    font: 600 11px/1 "Google Sans", Roboto, Arial, sans-serif;
+    box-shadow: 0 2px 6px rgba(16, 24, 40, 0.1);
+  }
+  .mercato-mode-label {
+    padding: 0 5px 0 7px;
+  }
+  .mercato-mode button {
+    height: 20px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #5f6368;
+    font: inherit;
     cursor: pointer;
-    box-shadow: 0 4px 10px rgba(16, 24, 40, 0.12);
   }
-  .mercato-shell-toggle:focus-visible {
+  .mercato-mode button:hover {
+    background: #f1f3f4;
+  }
+  .mercato-mode button:focus-visible {
     outline: 2px solid #0b57d0;
-    outline-offset: 2px;
+    outline-offset: 1px;
   }
-  .mercato-toggle-track {
-    position: relative;
-    width: 28px;
-    height: 16px;
-    border-radius: 8px;
-    background: #c4c7c5;
-    transition: background-color 150ms ease;
+  .mercato-mode button[aria-checked="true"] {
+    background: #e8eaed;
+    color: #1f1f1f;
   }
-  .mercato-toggle-knob {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: #ffffff;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    transition: transform 150ms ease;
-  }
-  .mercato-shell-toggle[aria-checked="true"] .mercato-toggle-track {
+  .mercato-mode button[data-mode="talos"][aria-checked="true"] {
     background: #0b57d0;
+    color: #ffffff;
   }
-  .mercato-shell-toggle[aria-checked="true"] .mercato-toggle-knob {
-    transform: translateX(12px);
+  .mercato-mode button[data-mode="onboarding"][aria-checked="true"] {
+    background: #34d3a6;
+    color: #06261d;
   }
 `;
 
+type TalosMode = "off" | "talos" | "onboarding";
+
+const MODES: Array<[TalosMode, string]> = [
+  ["off", "Off"],
+  ["talos", "On"],
+  ["onboarding", "Onboarding"]
+];
+
 export interface FolderShellController {
   getState(): FolderControllerState;
-  setFolder(gmailThreadId: string, folderId: string | null): Promise<void>;
 }
 
 export interface MailNavigator {
   /** Null until Gmail has reported its first route. */
   currentRoute(): MailRoute | null;
   search(query: string): Promise<void>;
+  openLabel(label: string): Promise<void>;
   openInbox(): Promise<void>;
   replaceSearch(element: HTMLElement | null): void;
   visibleRows(): VisibleRow[];
@@ -213,11 +255,19 @@ export class FolderShellView {
   private style: HTMLStyleElement | null = null;
   private row: HTMLDivElement | null = null;
   private errorEl: HTMLSpanElement | null = null;
-  private toggle: HTMLButtonElement | null = null;
+  /** Boxes are updated in place: rebuilding them between mousedown and mouseup drops the click. */
+  private readonly chips = new Map<string, HTMLButtonElement>();
+  private chipsKey = "";
+  private modeSelector: HTMLDivElement | null = null;
   private readonly searchBar: SearchBarView;
+  private readonly onboarding: OnboardingModal;
   private placementTick: number | null = null;
-  private visible = true;
+  /** Talos On: folder boxes, our search bar and P0 are shown. */
+  private visible = false;
+  private onboardingOpen = false;
   private activeFolderId: string | null = DEFAULT_FOLDERS[0]!.id;
+  /** The box just clicked: shown selected and loading until Gmail's route moves off `fromQuery`. */
+  private pendingFolder: { folderId: string; fromQuery: string | null } | null = null;
   /** Opening P0 waits until Gmail has a route; the extension can load before it does. */
   private pendingActivation = false;
   private sweeping = false;
@@ -232,6 +282,7 @@ export class FolderShellView {
   ) {
     this.visible = readVisibleState();
     this.searchBar = new SearchBarView((text) => this.runSearch(text), doc);
+    this.onboarding = new OnboardingModal(doc);
   }
 
   mount(): void {
@@ -252,45 +303,33 @@ export class FolderShellView {
     if (route?.list) {
       this.activeFolderId = route.query === null ? null : folderFromQuery(route.query, folders)?.id ?? null;
     }
-    const activeFolder = folders.find((folder) => folder.id === this.activeFolderId) ?? null;
+    if (this.pendingFolder && (route?.query ?? null) !== this.pendingFolder.fromQuery) this.pendingFolder = null;
+    const selectedId = this.selectedFolderId();
+    const activeFolder = folders.find((folder) => folder.id === selectedId) ?? null;
     let typed: string | null = null;
     if (route?.list) typed = route.search && route.query !== null ? userSearchText(route.query, folders) : "";
     this.searchBar.sync(typed, activeFolder?.name ?? null);
-    row.replaceChildren();
+    this.syncChips(row, folders);
 
     const counts = folderCounts(state);
     const openThreadId = state.snapshot.openThreadId;
     const openCategory = openThreadId ? state.categoryByThread[openThreadId] : undefined;
 
     for (const folder of folders) {
+      const button = this.chips.get(folder.id);
+      if (!button) continue;
       const count = this.sweepCounts?.get(folder.id) ?? counts.get(folder.id) ?? 0;
-      const button = this.doc.createElement("button");
-      button.type = "button";
-      button.className = "mercato-folder-box";
-      button.dataset.mercatoFolderId = folder.id;
       button.setAttribute("aria-label", `${folder.name}, ${count}`);
       const apiCount = state.folderCounts?.[folder.id];
       if (apiCount) button.title = `${apiCount.threads} emails, ${apiCount.unread} unread`;
-      button.setAttribute("aria-pressed", String(folder.id === this.activeFolderId));
+      else button.removeAttribute("title");
+      button.setAttribute("aria-pressed", String(folder.id === selectedId));
+      if (folder.id === this.pendingFolder?.folderId) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
       if (openCategory?.folderId === folder.id) button.setAttribute("aria-current", "true");
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const threadId = this.controller.getState().snapshot.openThreadId;
-        if (threadId) {
-          void this.controller.setFolder(threadId, folder.id).catch(() => undefined);
-          return;
-        }
-        void this.openFolder(folder);
-      });
-
-      const title = this.doc.createElement("span");
-      title.className = "mercato-folder-title";
-      title.textContent = folder.name;
-      const countEl = this.doc.createElement("span");
-      countEl.className = "mercato-folder-count";
-      countEl.textContent = String(count);
-      button.append(title, countEl);
-      row.append(button);
+      else button.removeAttribute("aria-current");
+      const countEl = button.querySelector(".mercato-folder-count");
+      if (countEl) countEl.textContent = String(count);
     }
 
     if (this.errorEl) {
@@ -305,20 +344,70 @@ export class FolderShellView {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.doc.removeEventListener("click", this.onCoveredClick, true);
     if (this.placementTick !== null) {
       window.clearInterval(this.placementTick);
       this.placementTick = null;
     }
     delete this.doc.documentElement.dataset.mercatoVisible;
     this.navigator?.replaceSearch(null);
+    this.onboarding.close(null);
     this.host?.remove();
     this.style?.remove();
-    this.toggle?.remove();
+    this.modeSelector?.remove();
     this.host = null;
     this.style = null;
     this.row = null;
     this.errorEl = null;
-    this.toggle = null;
+    this.modeSelector = null;
+  }
+
+  private currentMode(): TalosMode {
+    if (this.onboardingOpen) return "onboarding";
+    return this.visible ? "talos" : "off";
+  }
+
+  private selectMode(mode: TalosMode): void {
+    if (this.sweeping || mode === this.currentMode()) return;
+    if (mode === "onboarding") {
+      void this.runOnboarding();
+      return;
+    }
+    if (this.onboardingOpen) {
+      this.onboardingOpen = false;
+      this.onboarding.close(null);
+    }
+    this.setTalos(mode === "talos");
+  }
+
+  private setTalos(on: boolean): void {
+    if (on !== this.visible) {
+      this.visible = on;
+      writeVisibleState(on);
+      if (on && this.canSweep()) {
+        void this.sweepIn();
+        return;
+      }
+      if (on) void this.activate();
+      else this.deactivate();
+    }
+    this.render(this.controller.getState());
+  }
+
+  /** Building the inbox saves prompt v1 and turns Talos on; closing keeps the previous mode. */
+  private async runOnboarding(): Promise<void> {
+    this.onboardingOpen = true;
+    this.syncVisibility();
+    const saved = await loadOnboarding();
+    if (this.destroyed || !this.onboardingOpen) return;
+    const answers = await this.onboarding.open(saved?.answers ?? null);
+    if (this.destroyed) return;
+    const pickedOtherMode = !this.onboardingOpen;
+    this.onboardingOpen = false;
+    if (answers) await saveOnboarding(answers).catch(() => undefined);
+    if (this.destroyed || pickedOtherMode) return;
+    if (answers) this.setTalos(true);
+    else this.syncVisibility();
   }
 
   private ensureDom(): void {
@@ -341,44 +430,91 @@ export class FolderShellView {
       errorEl.className = "mercato-shell-error";
       errorEl.textContent = "!";
       host.append(row, errorEl);
+      this.doc.addEventListener("click", this.onCoveredClick, true);
       this.host = host;
       this.row = row;
       this.errorEl = errorEl;
     }
 
-    if (!this.toggle) {
-      const toggle = this.doc.createElement("button");
-      toggle.type = "button";
-      toggle.className = "mercato-shell-toggle";
-      toggle.setAttribute("role", "switch");
+    if (!this.modeSelector) {
+      const selector = this.doc.createElement("div");
+      selector.className = "mercato-mode";
+      selector.setAttribute("role", "radiogroup");
+      selector.setAttribute("aria-label", "Talos mode");
       const label = this.doc.createElement("span");
+      label.className = "mercato-mode-label";
       label.textContent = "Talos";
-      const track = this.doc.createElement("span");
-      track.className = "mercato-toggle-track";
-      const knob = this.doc.createElement("span");
-      knob.className = "mercato-toggle-knob";
-      track.append(knob);
-      toggle.append(label, track);
-      toggle.addEventListener("click", () => {
-        if (this.sweeping) return;
-        this.visible = !this.visible;
-        writeVisibleState(this.visible);
-        if (this.visible && this.canSweep()) {
-          void this.sweepIn();
-          return;
-        }
-        if (this.visible) void this.activate();
-        else this.deactivate();
-        this.render(this.controller.getState());
-      });
-      this.toggle = toggle;
-      this.doc.body.append(toggle);
+      selector.append(label);
+      for (const [mode, text] of MODES) {
+        const button = this.doc.createElement("button");
+        button.type = "button";
+        button.dataset.mode = mode;
+        button.setAttribute("role", "radio");
+        button.textContent = text;
+        button.addEventListener("click", () => this.selectMode(mode));
+        selector.append(button);
+      }
+      this.modeSelector = selector;
+      this.doc.body.append(selector);
     }
 
     if (this.placementTick === null) {
       // Gmail swaps toolbars on every navigation and drops foreign nodes.
       this.placementTick = window.setInterval(() => this.placeInToolbar(), 1000);
     }
+  }
+
+  private syncChips(row: HTMLElement, folders: Folder[]): void {
+    const key = JSON.stringify(folders.map((folder) => [folder.id, folder.name]));
+    if (key === this.chipsKey) return;
+    this.chipsKey = key;
+    this.chips.clear();
+    row.replaceChildren(...folders.map((folder) => this.createChip(folder)));
+  }
+
+  private createChip(folder: Folder): HTMLButtonElement {
+    const button = this.doc.createElement("button");
+    button.type = "button";
+    button.className = "mercato-folder-box";
+    button.dataset.mercatoFolderId = folder.id;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.selectFolder(folder.id);
+    });
+    const title = this.doc.createElement("span");
+    title.className = "mercato-folder-title";
+    title.textContent = folder.name;
+    const countEl = this.doc.createElement("span");
+    countEl.className = "mercato-folder-count";
+    button.append(title, countEl);
+    this.chips.set(folder.id, button);
+    return button;
+  }
+
+  /** Gmail's toolbar block can win hit-testing over a box; route such clicks by position. */
+  private readonly onCoveredClick = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!this.visible || !(target instanceof Node)) return;
+    for (const [folderId, chip] of this.chips) {
+      if (target === chip || !target.contains(chip)) continue;
+      const rect = chip.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left && event.clientX <= rect.right &&
+        event.clientY >= rect.top && event.clientY <= rect.bottom;
+      if (!inside) continue;
+      event.stopPropagation();
+      this.selectFolder(folderId);
+      return;
+    }
+  };
+
+  private selectFolder(folderId: string): void {
+    const folder = this.folders(this.controller.getState()).find((item) => item.id === folderId);
+    if (folder) void this.openFolder(folder);
+  }
+
+  private selectedFolderId(): string | null {
+    return this.pendingFolder?.folderId ?? this.activeFolderId;
   }
 
   private folders(state: FolderControllerState): Folder[] {
@@ -468,9 +604,7 @@ export class FolderShellView {
   }
 
   private chipFor(folderId: string): HTMLElement | null {
-    const chip = this.row?.querySelector<HTMLElement>(
-      `[data-mercato-folder-id="${CSS.escape(folderId)}"]`
-    );
+    const chip = this.chips.get(folderId);
     return chip && chip.isConnected && isVisible(chip) ? chip : null;
   }
 
@@ -504,24 +638,46 @@ export class FolderShellView {
 
   private async openFolder(folder: Folder): Promise<void> {
     this.activeFolderId = folder.id;
-    if (!this.navigator) {
+    const navigator = this.navigator;
+    if (!navigator) {
       this.render(this.controller.getState());
       return;
     }
     const folders = this.folders(this.controller.getState());
-    await this.navigator.search(folderSearchQuery(this.searchBar.text, folder, folders)).catch(() => undefined);
+    const query = folderSearchQuery(this.searchBar.text, folder, folders);
+    const fromQuery = navigator.currentRoute()?.query ?? null;
+    const pending = fromQuery === query ? null : { folderId: folder.id, fromQuery };
+    this.pendingFolder = pending;
+    this.render(this.controller.getState());
+    const settled = await this.go(query, folder).then(() => true, () => false);
+    // Gmail can accept a route and never move to it; the box must not stay busy forever.
+    const delay = settled ? PENDING_MAX_MS : 0;
+    window.setTimeout(() => {
+      if (!pending || this.pendingFolder !== pending) return;
+      this.pendingFolder = null;
+      this.render(this.controller.getState());
+    }, delay);
   }
 
   private runSearch(text: string): void {
     if (!this.navigator) return;
     const folders = this.folders(this.controller.getState());
-    const folder = folders.find((item) => item.id === this.activeFolderId) ?? null;
+    const folder = folders.find((item) => item.id === this.selectedFolderId()) ?? null;
     const query = folderSearchQuery(text, folder, folders);
     if (!query) {
       void this.navigator.openInbox().catch(() => undefined);
       return;
     }
-    void this.navigator.search(query).catch(() => undefined);
+    void this.go(query, folder).catch(() => undefined);
+  }
+
+  /** A bare folder opens Gmail's label view, which loads much faster than a search. */
+  private go(query: string, folder: Folder | null): Promise<void> {
+    const navigator = this.navigator;
+    if (!navigator) return Promise.resolve();
+    const label = folder?.gmailLabel;
+    if (label && query === quotedLabel(label)) return navigator.openLabel(label);
+    return navigator.search(query);
   }
 
   private placeInToolbar(): void {
@@ -540,7 +696,10 @@ export class FolderShellView {
   private syncVisibility(): void {
     this.doc.documentElement.dataset.mercatoVisible = this.visible ? "1" : "0";
     if (this.host) this.host.style.display = this.visible ? "" : "none";
-    this.toggle?.setAttribute("aria-checked", String(this.visible));
+    const mode = this.currentMode();
+    for (const button of this.modeSelector?.querySelectorAll<HTMLElement>("button[data-mode]") ?? []) {
+      button.setAttribute("aria-checked", String(button.dataset.mode === mode));
+    }
   }
 }
 
@@ -567,11 +726,12 @@ function visible(nodes: NodeListOf<HTMLElement>): HTMLElement | null {
   return null;
 }
 
+/** Talos starts Off until the user turns it on. */
 function readVisibleState(): boolean {
   try {
-    return window.localStorage.getItem(TOGGLE_STORAGE_KEY) !== "0";
+    return window.localStorage.getItem(TOGGLE_STORAGE_KEY) === "1";
   } catch {
-    return true;
+    return false;
   }
 }
 

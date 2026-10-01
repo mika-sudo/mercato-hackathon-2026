@@ -10,6 +10,7 @@ import {
 } from "../shared/extension-context";
 import { FolderController } from "./controller";
 import { FolderShellView } from "./folder-shell";
+import { loadOnboarding } from "./onboarding-store";
 import type { FolderShellController } from "./folder-shell";
 import type { FolderControllerState } from "./controller";
 
@@ -19,6 +20,8 @@ declare global {
       setFolder: (gmailThreadId: string, folderId: string | null) => Promise<void>;
       classify: (gmailThreadId: string) => Promise<void>;
       getState: () => ReturnType<FolderController["getState"]> | null;
+      /** Prompt v1 saved by onboarding, or null before it has run. */
+      getPrompt: () => Promise<string | null>;
     };
   }
 }
@@ -105,7 +108,8 @@ async function start(): Promise<void> {
     classify: async (gmailThreadId) => {
       await controller?.classify(gmailThreadId);
     },
-    getState: () => controller?.getState() ?? null
+    getState: () => controller?.getState() ?? null,
+    getPrompt: async () => (await loadOnboarding())?.prompt ?? null
   };
 }
 
@@ -123,8 +127,7 @@ function mountStaticShell(message: string): void {
     }
   };
   const shellController: FolderShellController = {
-    getState: () => state,
-    setFolder: async () => undefined
+    getState: () => state
   };
   folderShell = new FolderShellView(shellController, null);
   folderShell.mount();
